@@ -355,6 +355,7 @@ func (rf *Raft) logReplication() {
 		if server == rf.me {
 			continue
 		}
+		rf.mu.Lock()
 		args := AppendEntriesArgs{
 			Term:     rf.currentTerm,
 			LeaderId: rf.me,
@@ -363,8 +364,9 @@ func (rf *Raft) logReplication() {
 			// lastLogTerm:  rf.log[len(rf.log)-1].term
 		}
 		reply := AppendEntriesReply{}
-
 		DPrintf("sendAppendzEntries from [%v] to [%v]", rf.me, server)
+		rf.mu.Unlock()
+
 		go func(server int, args AppendEntriesArgs, reply AppendEntriesReply) {
 			if rf.sendAppendEntries(server, &args, &reply) {
 				rf.mu.Lock()
