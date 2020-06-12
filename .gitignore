@@ -2,3 +2,5 @@ pkg/
 api.key
 *-handin.tar.gz
 src/main/mr-out-0
+src/.DS_Store
+src/raft/log.txt
