@@ -180,14 +180,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("Start vote on %v", rf.me)
-	defer DPrintf("Vote complete on %v", rf.me)
+	DPrintf("RequestVote RPC call on [%v], received term: %v, currentTerm %v", rf.me, args.Term, rf.currentTerm)
 
+	reply.VoteGranted = false
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.switchStateTo(Follower)
 	}
 	reply.Term = rf.currentTerm
+	DPrintf("[%v] received vote request to vote for [%v]", rf.me, args.CandidateId)
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 	} else if (rf.votedFor == nil || *rf.votedFor == args.CandidateId) && args.LastLogIndex >= len(rf.log)-1 {
@@ -218,36 +219,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.currentTerm
+	reply.Success = true
 
-	if args.Term > rf.currentTerm {
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	} else if args.Term > rf.currentTerm {
+		// Candidate: discover current leader or new term
+		// Leader: discover leader with higher term
 		rf.currentTerm = args.Term
+		rf.switchStateTo(Follower)
 	}
 
 	go func() {
-		DPrintf("[%d] received AE, notify other goroutine", rf.me)
+		DPrintf("[%d] received AE, args.Term: %v, currentTerm: %v", rf.me, args.Term, rf.currentTerm)
 		rf.appendCh <- true
 	}()
-
-	if args.Term < rf.currentTerm {
-		DPrintf("[%d] received AE term < currentTerm", rf.me)
-		reply.Success = false
-		return
-	}
 
 	if len(rf.log) == 0 || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// DPrintf("PrevLogIndex term != log")
 		// DPrintf("rf.log=[%v], args.PrevLogIndex=[%v], args.PrevLogTerm=[%v]", rf.log, args.PrevLogIndex, args.PrevLogTerm)
 		reply.Success = false
 		return
-	}
-
-	switch rf.state {
-	case Candidate:
-		// discover current leader or new term
-		rf.switchStateTo(Follower)
-	case Leader:
-		// discover leader with higher term
-		rf.switchStateTo(Follower)
 	}
 
 	// TODO:  If an existing entry conflicts with a new one (same index
@@ -259,7 +252,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If leaderCommit > commitIndex, set commitIndex min(leaderCommit, index of last new entry)
 
 	// execute append entries
-	reply.Success = true
 
 	return
 }
@@ -304,7 +296,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) leaderElection() {
-	DPrintf("---------Initial election from node:%v-------", rf.me)
 	rf.mu.Lock()
 	rf.state = Candidate
 	rf.currentTerm++
@@ -312,9 +303,11 @@ func (rf *Raft) leaderElection() {
 	lastLogTerm := -1
 	term := rf.currentTerm
 	rf.voteCount = 1
+	rf.timer.Reset(rf.timeout)
 	if len(rf.log) > 0 {
 		lastLogTerm = rf.log[len(rf.log)-1].Term
 	}
+	DPrintf("++++Initial election from node:%v for term %v+++", rf.me, term)
 	rf.mu.Unlock()
 
 	for server, _ := range rf.peers {
@@ -344,7 +337,6 @@ func (rf *Raft) leaderElection() {
 			rf.voteCount++
 			rf.mu.Unlock()
 			DPrintf("[%d] got vote from %d", rf.me, server)
-			rf.logReplication()
 		}(server)
 	}
 	// DPrintf("leaderElection complete for %v", rf.me)
@@ -499,6 +491,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case Candidate:
 				select {
 				case <-rf.timer.C:
+					DPrintf("Candidate [%v] timeout, re-election", rf.me)
 					rf.leaderElection()
 				case <-rf.appendCh:
 					DPrintf("Candidate [%v] reset election timer", rf.me)
@@ -515,13 +508,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 			case Leader:
 				DPrintf("Leader [%v] reset hearbeat timeout", rf.me)
-				rf.timer.Reset(appendEntriesTimout)
-				select {
-				case <-rf.timer.C:
-					DPrintf("[%v] Leader heartbeat timeout", rf.me)
-					rf.logReplication()
-				}
+				rf.logReplication()
+				time.Sleep(appendEntriesTimout)
 			}
+			// if rf.killed() {
+			// 	DPrintf("[%v] is killed", rf.me)
+			// }
 
 		}
 	}()
